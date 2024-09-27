@@ -21,6 +21,17 @@ module.exports = {
       timeoutBlocks: 200,
       skipDryRun: true
     },
+    arbitrum_sepolia: {
+      provider: () => new HDWalletProvider({
+        mnemonic: MNEMONIC,
+        providerOrUrl: 'https://arb-sepolia.g.alchemy.com/v2/Ndodys40XWZ2qIZxb_CS6kp2NYv2rHhk'
+      }),
+      network_id: 421614,
+      gas: 6000000,
+      confirmations: 2,
+      timeoutBlocks: 200,
+      skipDryRun: true
+    },
   },
   compilers: {
     solc: {
