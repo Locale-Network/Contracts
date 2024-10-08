@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { MNEMONIC, ARBI_API_KEY } = process.env;
+const { MNEMONIC, MNEMONIC_ANVIL, ARBI_API_KEY } = process.env;
 const HDWalletProvider = require('@truffle/hdwallet-provider');
 
 module.exports = {
@@ -10,6 +10,17 @@ module.exports = {
     'truffle-plugin-verify'
   ],
   networks: {
+    anvil: {
+      provider: () => new HDWalletProvider({
+        mnemonic: MNEMONIC_ANVIL,
+        providerOrUrl: 'http://127.0.0.1:8545'
+      }),
+      network_id: 31337,
+      gas: 6000000,
+      confirmations: 2,
+      timeoutBlocks: 200,
+      skipDryRun: true
+    },
     arbitrum_blueberry: {
       provider: () => new HDWalletProvider({
         mnemonic: MNEMONIC,
