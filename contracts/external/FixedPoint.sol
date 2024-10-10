@@ -384,7 +384,7 @@ library FixedPoint {
   // ------------------------------------------------- SIGNED -------------------------------------------------------------
   // Supports 18 decimals. E.g., 1e18 represents "1", 5e17 represents "0.5".
   // For signed values:
-  //   This can represent a value up (or down) to +-(2^255 - 1)/10^18 = ~10^58. 10^58 will be stored internally as int256 10^76.
+  // This can represent a value up (or down) to +-(2^255 - 1)/10^18 = ~10^58. 10^58 will be stored internally as int256 10^76.
   int256 private constant SFP_SCALING_FACTOR = 10**18;
 
   struct Signed {
