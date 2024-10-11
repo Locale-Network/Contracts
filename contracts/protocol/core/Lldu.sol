@@ -7,7 +7,7 @@ import "./ConfigHelper.sol";
 
 /**
  * @title Lldu
- * @notice Lldu (symbol: FIDU) is LocaleLending's liquidity token, representing shares
+ * @notice Lldu (symbol: LLDU) is LocaleLending's liquidity token, representing shares
  *  in the Pool. When you deposit, we mint a corresponding amount of Lldu, and when you withdraw, we
  *  burn Lldu. The share price of the Pool implicitly represents the "exchange rate" between Lldu
  *  and USDC (or whatever currencies the Pool may allow withdraws in during the future)

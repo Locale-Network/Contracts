@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 
 pragma solidity ^0.8.11;
-pragma experimental ABIEncoderV2;
 
 import "./BaseUpgradeablePausable.sol";
 import "./ConfigHelper.sol";
@@ -10,14 +9,19 @@ import "./ConfigHelper.sol";
  * @title LocaleLending's Pool contract
  * @notice Main entry point for LP's (a.k.a. capital providers)
  *  Handles key logic for depositing and withdrawing funds from the Pool
+ *  Integrated with Cartesi Rollups for off-chain computations
  * @author LocaleLending
  */
 
 contract Pool is BaseUpgradeablePausable, IPool {
-  LocaleLendingConfig public config;
+  LocaleLendingConfig public immutable config;
   using ConfigHelper for LocaleLendingConfig;
 
+  ICartesiRollup public cartesiRollup;
+
   uint256 public compoundBalance;
+  uint256 private constant LLDU_MANTISSA = 1e18;
+  uint256 private constant USDC_MANTISSA = 1e6;
 
   event DepositMade(address indexed capitalProvider, uint256 amount, uint256 shares);
   event WithdrawalMade(address indexed capitalProvider, uint256 userAmount, uint256 reserveAmount);
@@ -27,35 +31,33 @@ contract Pool is BaseUpgradeablePausable, IPool {
   event ReserveFundsCollected(address indexed user, uint256 amount);
   event PrincipalWrittendown(address indexed creditline, int256 amount);
   event LocaleLendingConfigUpdated(address indexed who, address configAddress);
+  event OffChainComputationRequested(uint256 requestId, string computationType, bytes data);
+  event OffChainComputationCompleted(uint256 requestId, bytes result);
 
-  /**
-   * @notice Run only once, on initialization
-   * @param owner The address of who should have the "OWNER_ROLE" of this contract
-   * @param _config The address of the LocaleLendingConfig contract
-   */
-  function initialize(address owner, LocaleLendingConfig _config) public initializer {
-    require(owner != address(0) && address(_config) != address(0), "Owner and config addresses cannot be empty");
-
-    __BaseUpgradeablePausable__init(owner);
-
+  constructor(address owner, LocaleLendingConfig _config, address _cartesiRollup) {
+    require(owner != address(0) && address(_config) != address(0), "Invalid addresses");
+    __BaseUpgradeablePausable_init(owner);
     config = _config;
-    sharePrice = llduMantissa();
-    IERC20withDec usdc = config.getUSDC();
-    // Sanity check the address
-    usdc.totalSupply();
+    cartesiRollup = ICartesiRollup(_cartesiRollup);
+    sharePrice = LLDU_MANTISSA;
 
-    // Unlock self for infinite amount
-    bool success = usdc.approve(address(this), uint256(-1));
-    require(success, "Failed to approve USDC");
+    IERC20withDec usdc = config.getUSDC();
+    usdc.totalSupply(); // Sanity check
+    require(usdc.approve(address(this), type(uint256).max), "USDC approval failed");
   }
 
   /**
-   * @notice Deposits `amount` USDC from msg.sender into the Pool, and returns you the equivalent value of FIDU tokens
+   * @notice Deposits `amount` USDC from msg.sender into the Pool, and returns you the equivalent value of LLDU tokens
    * @param amount The amount of USDC to deposit
    */
   function deposit(uint256 amount) external override whenNotPaused withinTransactionLimit(amount) nonReentrant {
     require(amount > 0, "Must deposit more than zero");
-    // Check if the amount of new shares to be added is within limits
+
+    // Trigger off-chain computation to update financial metrics
+    bytes memory data = abi.encode(msg.sender, amount);
+    uint256 requestId = uint256(keccak256(abi.encodePacked(block.timestamp, msg.sender)));
+    emit OffChainComputationRequested(requestId, "UpdateMetrics", data);
+
     uint256 depositShares = getNumShares(amount);
     uint256 potentialNewTotalShares = totalShares().add(depositShares);
     require(poolWithinLimit(potentialNewTotalShares), "Deposit would put the Pool over the total limit.");
@@ -66,8 +68,13 @@ contract Pool is BaseUpgradeablePausable, IPool {
     config.getLldu().mintTo(msg.sender, depositShares);
   }
 
+  function completeOffChainComputation(uint256 requestId, bytes calldata result) external {
+    require(msg.sender == address(cartesiRollup), "Only Cartesi Rollup can call this function");
+    emit OffChainComputationCompleted(requestId, result);
+  }
+
   /**
-   * @notice Withdraws USDC from the Pool to msg.sender, and burns the equivalent value of FIDU tokens
+   * @notice Withdraws USDC from the Pool to msg.sender, and burns the equivalent value of LLDU tokens
    * @param usdcAmount The amount of USDC to withdraw
    */
   function withdraw(uint256 usdcAmount) external override whenNotPaused nonReentrant {
@@ -82,7 +89,7 @@ contract Pool is BaseUpgradeablePausable, IPool {
   }
 
   /**
-   * @notice Withdraws USDC (denominated in FIDU terms) from the Pool to msg.sender
+   * @notice Withdraws USDC (denominated in LLDU terms) from the Pool to msg.sender
    * @param llduAmount The amount of USDC to withdraw in terms of lldu shares
    */
   function withdrawInLldu(uint256 llduAmount) external override whenNotPaused nonReentrant {
@@ -112,6 +119,10 @@ contract Pool is BaseUpgradeablePausable, IPool {
     uint256 principal
   ) public override onlyCreditDesk whenNotPaused {
     _collectInterestAndPrincipal(from, interest, principal);
+
+    bytes memory data = abi.encode(from, interest, principal);
+    uint256 requestId = uint256(keccak256(abi.encodePacked(block.timestamp, from)));
+    emit OffChainComputationRequested(requestId, "CollectInterest", data);
   }
 
   function distributeLosses(address creditlineAddress, int256 writedownDelta)
@@ -261,23 +272,18 @@ contract Pool is BaseUpgradeablePausable, IPool {
 
   /* Internal Functions */
 
-  function _withdraw(uint256 usdcAmount, uint256 withdrawShares) internal withinTransactionLimit(usdcAmount) {
+  function _withdraw(uint256 usdcAmount, uint256 withdrawShares) internal {
     ILldu lldu = config.getLldu();
-    // Determine current shares the address has and the shares requested to withdraw
-    uint256 currentShares = lldu.balanceOf(msg.sender);
-    // Ensure the address has enough value in the pool
-    require(withdrawShares <= currentShares, "Amount requested is greater than what this address owns");
+    require(withdrawShares <= lldu.balanceOf(msg.sender), "Insufficient balance");
 
-    uint256 reserveAmount = usdcAmount.div(config.getWithdrawFeeDenominator());
-    uint256 userAmount = usdcAmount.sub(reserveAmount);
+    uint256 reserveAmount = usdcAmount / config.getWithdrawFeeDenominator();
+    uint256 userAmount = usdcAmount - reserveAmount;
 
     emit WithdrawalMade(msg.sender, userAmount, reserveAmount);
-    // Send the amounts
-    bool success = doUSDCTransfer(address(this), msg.sender, userAmount);
-    require(success, "Failed to transfer for withdraw");
+    
+    require(doUSDCTransfer(address(this), msg.sender, userAmount), "Withdrawal transfer failed");
     sendToReserve(address(this), reserveAmount, msg.sender);
 
-    // Burn the shares
     lldu.burnFrom(msg.sender, withdrawShares);
   }
 
@@ -347,45 +353,21 @@ contract Pool is BaseUpgradeablePausable, IPool {
     emit LocaleLendingConfigUpdated(msg.sender, address(config));
   }
 
-  function llduMantissa() internal pure returns (uint256) {
-    return uint256(10)**uint256(18);
-  }
-
-  function usdcMantissa() internal pure returns (uint256) {
-    return uint256(10)**uint256(6);
-  }
-
   function usdcToLldu(uint256 amount) internal pure returns (uint256) {
-    return amount.mul(llduMantissa()).div(usdcMantissa());
+    return amount * LLDU_MANTISSA / USDC_MANTISSA;
   }
 
-  function cUSDCToUSDC(uint256 exchangeRate, uint256 amount) internal pure returns (uint256) {
-    // See https://compound.finance/docs#protocol-math
-    // But note, the docs and reality do not agree. Docs imply that that exchange rate is
-    // scaled by 1e18, but tests and mainnet forking make it appear to be scaled by 1e16
-    // 1e16 is also what Sheraz at Certik said.
-    uint256 usdcDecimals = 6;
-    uint256 cUSDCDecimals = 8;
-
-    // We multiply in the following order, for the following reasons...
-    // Amount in cToken (1e8)
-    // Amount in USDC (but scaled by 1e16, cause that's what exchange rate decimals are)
-    // Downscale to cToken decimals (1e8)
-    // Downscale from cToken to USDC decimals (8 to 6)
-    return amount.mul(exchangeRate).div(10**(18 + usdcDecimals - cUSDCDecimals)).div(10**2);
-  }
-
-  function totalShares() internal view returns (uint256) {
-    return config.getLldu().totalSupply();
+  function llduToUSDC(uint256 amount) internal pure returns (uint256) {
+    return amount * USDC_MANTISSA / LLDU_MANTISSA;
   }
 
   function usdcToSharePrice(uint256 usdcAmount) internal view returns (uint256) {
-    return usdcToLldu(usdcAmount).mul(llduMantissa()).div(totalShares());
+    return usdcToLldu(usdcAmount).mul(LLDU_MANTISSA).div(totalShares());
   }
 
   function poolWithinLimit(uint256 _totalShares) internal view returns (bool) {
     return
-      _totalShares.mul(sharePrice).div(llduMantissa()) <=
+      _totalShares.mul(sharePrice).div(LLDU_MANTISSA) <=
       usdcToLldu(config.getNumber(uint256(ConfigOptions.Numbers.TotalFundsLimit)));
   }
 
@@ -394,15 +376,11 @@ contract Pool is BaseUpgradeablePausable, IPool {
   }
 
   function getNumShares(uint256 amount) internal view returns (uint256) {
-    return usdcToLldu(amount).mul(llduMantissa()).div(sharePrice);
+    return usdcToLldu(amount).mul(LLDU_MANTISSA).div(sharePrice);
   }
 
   function getUSDCAmountFromShares(uint256 llduAmount) internal view returns (uint256) {
-    return llduToUSDC(llduAmount.mul(sharePrice).div(llduMantissa()));
-  }
-
-  function llduToUSDC(uint256 amount) internal pure returns (uint256) {
-    return amount.div(llduMantissa().div(usdcMantissa()));
+    return llduToUSDC(llduAmount.mul(sharePrice).div(LLDU_MANTISSA));
   }
 
   function sendToReserve(

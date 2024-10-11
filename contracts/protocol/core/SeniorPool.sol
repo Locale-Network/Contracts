@@ -60,7 +60,7 @@ contract SeniorPool is BaseUpgradeablePausable, ISeniorPool {
 
   /**
    * @notice Deposits `amount` USDC from msg.sender into the SeniorPool, and grants you the
-   *  equivalent value of FIDU tokens
+   *  equivalent value of LLDU tokens
    * @param amount The amount of USDC to deposit
    */
   function deposit(uint256 amount) public override whenNotPaused nonReentrant returns (uint256 depositShares) {
@@ -98,7 +98,7 @@ contract SeniorPool is BaseUpgradeablePausable, ISeniorPool {
   }
 
   /**
-   * @notice Withdraws USDC from the SeniorPool to msg.sender, and burns the equivalent value of FIDU tokens
+   * @notice Withdraws USDC from the SeniorPool to msg.sender, and burns the equivalent value of LLDU tokens
    * @param usdcAmount The amount of USDC to withdraw
    */
   function withdraw(uint256 usdcAmount) external override whenNotPaused nonReentrant returns (uint256 amount) {
@@ -114,8 +114,8 @@ contract SeniorPool is BaseUpgradeablePausable, ISeniorPool {
   }
 
   /**
-   * @notice Withdraws USDC (denominated in FIDU terms) from the SeniorPool to msg.sender
-   * @param llduAmount The amount of USDC to withdraw in terms of FIDU shares
+   * @notice Withdraws USDC (denominated in LLDU terms) from the SeniorPool to msg.sender
+   * @param llduAmount The amount of USDC to withdraw in terms of LLDU shares
    */
   function withdrawInLldu(uint256 llduAmount) external override whenNotPaused nonReentrant returns (uint256 amount) {
     require(config.getGo().goSeniorPool(msg.sender), "This address has not been go-listed");
@@ -275,8 +275,8 @@ contract SeniorPool is BaseUpgradeablePausable, ISeniorPool {
   }
 
   /**
-   * @notice Converts and USDC amount to FIDU amount
-   * @param amount USDC amount to convert to FIDU
+   * @notice Converts and USDC amount to LLDU amount
+   * @param amount USDC amount to convert to LLDU
    */
   function getNumShares(uint256 amount) public view override returns (uint256) {
     return usdcToLldu(amount).mul(llduMantissa()).div(sharePrice);
