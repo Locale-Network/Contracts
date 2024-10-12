@@ -4,6 +4,8 @@ pragma solidity ^0.8.11;
 
 import "./BaseUpgradeablePausable.sol";
 import "./ConfigHelper.sol";
+import "../../interfaces/ICartesiRollup.sol";
+import "../../interfaces/IERC20withDec.sol";
 
 /**
  * @title LocaleLending's Pool contract
@@ -34,9 +36,10 @@ contract Pool is BaseUpgradeablePausable, IPool {
   event OffChainComputationRequested(uint256 requestId, string computationType, bytes data);
   event OffChainComputationCompleted(uint256 requestId, bytes result);
 
-  constructor(address owner, LocaleLendingConfig _config, address _cartesiRollup) {
-    require(owner != address(0) && address(_config) != address(0), "Invalid addresses");
-    __BaseUpgradeablePausable_init(owner);
+  // Update the constructor to use initializer pattern
+  function initialize(address owner, LocaleLendingConfig _config, address _cartesiRollup) public initializer {
+    require(owner != address(0) && address(_config) != address(0) && _cartesiRollup != address(0), "Invalid addresses");
+    __BaseUpgradeablePausable__init(owner);
     config = _config;
     cartesiRollup = ICartesiRollup(_cartesiRollup);
     sharePrice = LLDU_MANTISSA;
@@ -53,10 +56,8 @@ contract Pool is BaseUpgradeablePausable, IPool {
   function deposit(uint256 amount) external override whenNotPaused withinTransactionLimit(amount) nonReentrant {
     require(amount > 0, "Must deposit more than zero");
 
-    // Trigger off-chain computation to update financial metrics
-    bytes memory data = abi.encode(msg.sender, amount);
-    uint256 requestId = uint256(keccak256(abi.encodePacked(block.timestamp, msg.sender)));
-    emit OffChainComputationRequested(requestId, "UpdateMetrics", data);
+    // Move off-chain computation request to a separate function
+    _requestOffChainComputation("UpdateMetrics", abi.encode(msg.sender, amount));
 
     uint256 depositShares = getNumShares(amount);
     uint256 potentialNewTotalShares = totalShares().add(depositShares);
@@ -71,6 +72,7 @@ contract Pool is BaseUpgradeablePausable, IPool {
   function completeOffChainComputation(uint256 requestId, bytes calldata result) external {
     require(msg.sender == address(cartesiRollup), "Only Cartesi Rollup can call this function");
     emit OffChainComputationCompleted(requestId, result);
+    // Implement logic to handle the result
   }
 
   /**
@@ -119,10 +121,7 @@ contract Pool is BaseUpgradeablePausable, IPool {
     uint256 principal
   ) public override onlyCreditDesk whenNotPaused {
     _collectInterestAndPrincipal(from, interest, principal);
-
-    bytes memory data = abi.encode(from, interest, principal);
-    uint256 requestId = uint256(keccak256(abi.encodePacked(block.timestamp, from)));
-    emit OffChainComputationRequested(requestId, "CollectInterest", data);
+    _requestOffChainComputation("CollectInterest", abi.encode(from, interest, principal));
   }
 
   function distributeLosses(address creditlineAddress, int256 writedownDelta)
@@ -218,18 +217,19 @@ contract Pool is BaseUpgradeablePausable, IPool {
     (success, _res) = compoundController.call(data);
     require(success, "Failed to claim COMP");
 
-    // Send our balance of COMP!
-    address compToken = address(0xc00e94Cb662C3520282E6f5717214004A7f26888);
-    data = abi.encodeWithSignature("balanceOf(address)", address(this));
-    // solhint-disable-next-line avoid-low-level-calls
-    (success, _res) = compToken.call(data);
-    uint256 compBalance = toUint256(_res);
-    data = abi.encodeWithSignature("transfer(address,uint256)", seniorPoolAddress, compBalance);
-    // solhint-disable-next-line avoid-low-level-calls
-    (success, _res) = compToken.call(data);
-    require(success, "Failed to transfer COMP");
+    // Use a more gas-efficient way to transfer COMP
+    IERC20 compToken = IERC20(0xc00e94Cb662C3520282E6f5717214004A7f26888);
+    uint256 compBalance = compToken.balanceOf(address(this));
+    require(compToken.transfer(seniorPoolAddress, compBalance), "Failed to transfer COMP");
+
+    // Add an event to log the migration
+    emit MigratedToSeniorPool(seniorPoolAddress, balance, compBalance);
   }
 
+  /// @notice Converts bytes to uint256
+  /// @dev Uses assembly for gas efficiency when handling return data from external calls
+  /// @param _bytes The bytes to convert
+  /// @return value The resulting uint256 value
   function toUint256(bytes memory _bytes) internal pure returns (uint256 value) {
     assembly {
       value := mload(add(_bytes, 0x20))
@@ -411,5 +411,14 @@ contract Pool is BaseUpgradeablePausable, IPool {
   modifier onlyCreditDesk() {
     require(msg.sender == config.creditDeskAddress(), "Only the credit desk is allowed to call this function");
     _;
+  }
+
+  // Add a new event
+  event MigratedToSeniorPool(address indexed seniorPool, uint256 usdcAmount, uint256 compAmount);
+
+  function _requestOffChainComputation(string memory computationType, bytes memory data) internal {
+    uint256 requestId = uint256(keccak256(abi.encodePacked(block.timestamp, msg.sender)));
+    cartesiRollup.sendRequest(requestId, abi.encode(computationType, data));
+    emit OffChainComputationRequested(requestId, computationType, data);
   }
 }
